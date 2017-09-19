@@ -1,0 +1,9 @@
+FROM golang:1.9
+
+WORKDIR /go/src/livetocode/camunda-prometheus-exporter
+COPY main.go .
+
+RUN go-wrapper download github.com/prometheus/client_golang/prometheus   # "go get -d -v ./..."
+RUN go-wrapper install    # "go install -v ./..."
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app .
+#CMD ["go-wrapper", "run"] # ["app"]
