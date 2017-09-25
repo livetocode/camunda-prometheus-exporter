@@ -16,6 +16,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+//TODO: measure elapsed time for a scrape
+
 type MetricCount struct {
 	Count int `json:"count"`
 }
@@ -54,6 +56,21 @@ type ProcessDefinitionStatisticsResult struct {
 	Definition ProcessDefinition `json:"definition"`
 }
 
+type HistoryProcessDefinitionActivityResult struct {
+	ActivityId    	string       `json:"id"`
+	Instances  		int          `json:"instances"`
+	Canceled   		int          `json:"canceled"`
+	Finished   		int          `json:"finished"`
+	CompleteScope	int          `json:"completeScope"`
+}
+
+type ProcessDefinitionStatisticsActivityResult struct {
+	ActivityId string            `json:"id"`
+	Instances  int               `json:"instances"`
+	FailedJobs int               `json:"failedJobs"`
+	//Incidents
+}
+
 var (
 	serverUrl string
 	verbose   bool
@@ -62,10 +79,10 @@ var (
 		Timeout: time.Second * 5,
 	}
 
-	incidentsCounter = prometheus.NewGaugeVec(
+	historyIncidentsCounter = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "camunda_incidents_total",
-			Help: "Number of incidents within a Camunda server",
+			Name: "camunda_history_incidents_total",
+			Help: "Number of history incidents within a Camunda server",
 		},
 		[]string{"status"},
 	)
@@ -94,6 +111,54 @@ var (
 		[]string{"id", "definitionId", "definitionKey", "definitionVersion", "deploymentId", "tenantId"},
 	)
 
+	processActivityInstancesCounter = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "camunda_process_activity_instances_total",
+			Help: "Number of instances for a specific activity",
+		},
+		[]string{"activityId", "definitionKey", "definitionId", "definitionVersion"},
+	)
+	
+	processActivityFailedJobsCounter = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "camunda_process_activity_failed_jobs_total",
+			Help: "Number of failed jobs for a specific activity",
+		},
+		[]string{"activityId", "definitionKey", "definitionId", "definitionVersion"},
+	)
+	
+	historyProcessActivityInstancesCounter = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "camunda_history_process_activity_instances_total",
+			Help: "Number of instances of a specific activity in the history",
+		},
+		[]string{"activityId", "definitionKey", "definitionId", "definitionVersion"},
+	)
+
+	historyProcessActivityCanceledCounter = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "camunda_history_process_activity_canceled_total",
+			Help: "Number of canceled activities for a specific activity in the history",
+		},
+		[]string{"activityId", "definitionKey", "definitionId", "definitionVersion"},
+	)
+
+	historyProcessActivityFinishedCounter = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "camunda_history_process_activity_finished_total",
+			Help: "Number of finished activities for a specific activity in the history",
+		},
+		[]string{"activityId", "definitionKey", "definitionId", "definitionVersion"},
+	)
+
+	historyProcessActivityCompleteScopeCounter = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "camunda_history_process_activity_complete_scope_total",
+			Help: "Number of CompleteScope activities for a specific activity in the history",
+		},
+		[]string{"activityId", "definitionKey", "definitionId", "definitionVersion"},
+	)
+
 	processActivitiesCounter = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "camunda_process_activities_total",
@@ -109,6 +174,13 @@ var (
 		},
 		[]string{"name"},
 	)
+	scrapeDurationCounter = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "camunda_scrape_duration_seconds",
+			Help: "Duration of a scrape in seconds",
+		},
+		[]string{"name"},
+	)
 )
 
 func fetchJson(url string, data interface{}) error {
@@ -116,9 +188,14 @@ func fetchJson(url string, data interface{}) error {
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Accept", "application/json")
 	res, getErr := httpClient.Do(req)
 	if getErr != nil {
 		return getErr
+	}
+	//TODO: should we allow 404?
+	if verbose {
+		log.Printf("%s -> %d\n", url, res.StatusCode)
 	}
 	if res.StatusCode != 200 {
 		return errors.New(fmt.Sprintf("%s => %d", url, res.StatusCode))
@@ -135,7 +212,8 @@ func fetchJson(url string, data interface{}) error {
 	return nil
 }
 
-func fetchIncidents(status string) (int, error) {
+func fetchHistoryIncidents(status string) (int, error) {
+	// https://docs.camunda.org/manual/7.6/reference/rest/history/incident/get-incident-query-count/
 	url := fmt.Sprintf("%s/engine-rest/history/incident/count?%s=true", serverUrl, status)
 	metric := MetricCount{}
 	err := fetchJson(url, &metric)
@@ -147,14 +225,14 @@ func fetchIncidents(status string) (int, error) {
 	if verbose {
 		log.Printf("%d %s incidents\n", metric.Count, status)
 	}
-	incidentsCounter.With(prometheus.Labels{"status": status}).Set(float64(metric.Count))
+	historyIncidentsCounter.With(prometheus.Labels{"status": status}).Set(float64(metric.Count))
 	return metric.Count, nil
 }
 
-func fetchMultipleIncidents(statuses ...string) error {
+func fetchMultipleHistoryIncidents(statuses ...string) error {
 	var hasErrors = false
 	for _, status := range statuses {
-		if _, err := fetchIncidents(status); err != nil {
+		if _, err := fetchHistoryIncidents(status); err != nil {
 			hasErrors = true
 		}
 	}
@@ -165,6 +243,7 @@ func fetchMultipleIncidents(statuses ...string) error {
 }
 
 func fetchMetrics(maxResults int, startDate string) ([]Metric, error) {
+	// https://docs.camunda.org/manual/7.6/reference/rest/metrics/get-metrics-interval/
 	url := fmt.Sprintf("%s/engine-rest/metrics?maxResults=%d", serverUrl, maxResults)
 	if startDate != "" {
 		url += fmt.Sprintf("&startDate=%s", startDate)
@@ -207,6 +286,7 @@ func collectMetrics() ([]Metric, error) {
 }
 
 func fetchProcessDefinitionStatistics() ([]ProcessDefinitionStatisticsResult, error) {
+	// https://docs.camunda.org/manual/7.7/reference/rest/process-definition/get-statistics/
 	url := fmt.Sprintf("%s/engine-rest/process-definition/statistics?failedJobs=true", serverUrl)
 	result := []ProcessDefinitionStatisticsResult{}
 	err := fetchJson(url, &result)
@@ -214,6 +294,77 @@ func fetchProcessDefinitionStatistics() ([]ProcessDefinitionStatisticsResult, er
 		return nil, err
 	}
 	return result, nil
+}
+
+func fetchProcessDefinitionActivities(processDefinitionId string) ([]ProcessDefinitionStatisticsActivityResult, error) {
+	// https://docs.camunda.org/manual/7.6/reference/rest/process-definition/get-activity-statistics/
+	url := fmt.Sprintf("%s/engine-rest/process-definition/%s/statistics?failedJobs=true", serverUrl, processDefinitionId)
+	result := []ProcessDefinitionStatisticsActivityResult{}
+	err := fetchJson(url, &result)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func fetchHistoryProcessDefinitionActivities(processDefinitionId string) ([]HistoryProcessDefinitionActivityResult, error) {
+	// https://docs.camunda.org/manual/7.6/reference/rest/history/process-definition/get-historic-activity-statistics/
+	url := fmt.Sprintf("%s/engine-rest/history/process-definition/%s/statistics?canceled=true&finished=true&completeScope=true", serverUrl, processDefinitionId)
+	result := []HistoryProcessDefinitionActivityResult{}
+	err := fetchJson(url, &result)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func collectProcessDefinitionActivities(processDefinition ProcessDefinition) error {
+	stats, err := fetchProcessDefinitionActivities(processDefinition.Id)
+	if err != nil {
+		errorCounter.With(prometheus.Labels{"name": "fetchProcessDefinitionActivities"}).Inc()
+		return err
+	}
+	if verbose {
+		log.Printf("Found %d activities for process definition %s\n", len(stats), processDefinition.Id)
+	}
+	for _, stat := range stats {
+		labels := prometheus.Labels{
+			"activityId":        stat.ActivityId,
+			"definitionId":      processDefinition.Id,
+			"definitionKey":     processDefinition.Key,
+			"definitionVersion": strconv.Itoa(processDefinition.Version)}
+	
+		processActivityInstancesCounter.With(labels).Set(float64(stat.Instances))
+		processActivityFailedJobsCounter.With(labels).Set(float64(stat.FailedJobs))
+		if verbose {
+			//log.Printf("%s: %d instances / %d failedJobs\n", stat.Definition, stat.Instances, stat.FailedJobs)
+		}
+	}
+	// Same as previously but in the History
+	historyStats, historyErr := fetchHistoryProcessDefinitionActivities(processDefinition.Id)
+	if historyErr != nil {
+		errorCounter.With(prometheus.Labels{"name": "fetchHistoryProcessDefinitionActivities"}).Inc()
+		return err
+	}
+	if verbose {
+		log.Printf("History: Found %d activities for process definition %s\n", len(historyStats), processDefinition.Id)
+	}
+	for _, historyStat := range historyStats {
+		labels := prometheus.Labels{
+			"activityId":        historyStat.ActivityId,
+			"definitionId":      processDefinition.Id,
+			"definitionKey":     processDefinition.Key,
+			"definitionVersion": strconv.Itoa(processDefinition.Version)}
+	
+		historyProcessActivityInstancesCounter.With(labels).Set(float64(historyStat.Instances))
+		historyProcessActivityCanceledCounter.With(labels).Set(float64(historyStat.Canceled))
+		historyProcessActivityFinishedCounter.With(labels).Set(float64(historyStat.Finished))
+		historyProcessActivityCompleteScopeCounter.With(labels).Set(float64(historyStat.CompleteScope))
+		if verbose {
+			//log.Printf("%s: %d instances / %d failedJobs\n", stat.Definition, stat.Instances, stat.FailedJobs)
+		}
+	}	
+	return nil
 }
 
 func createCounterLabelsFromStats(stat ProcessDefinitionStatisticsResult) prometheus.Labels {
@@ -229,7 +380,7 @@ func createCounterLabelsFromStats(stat ProcessDefinitionStatisticsResult) promet
 func collectProcessDefinitionStatistics() error {
 	stats, err := fetchProcessDefinitionStatistics()
 	if err != nil {
-		errorCounter.With(prometheus.Labels{"name": "processDefinitionStatistics"}).Inc()
+		errorCounter.With(prometheus.Labels{"name": "fetchProcessDefinitionStatistics"}).Inc()
 		return err
 	}
 	if verbose {
@@ -242,11 +393,16 @@ func collectProcessDefinitionStatistics() error {
 		if verbose {
 			//log.Printf("%s: %d instances / %d failedJobs\n", stat.Definition, stat.Instances, stat.FailedJobs)
 		}
+		err = collectProcessDefinitionActivities(stat.Definition)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func fetchActivityInstanceCount(activityId string, activityName string, definitionKey string) (int, error) {
+	// https://docs.camunda.org/manual/7.6/reference/rest/history/activity-instance/get-activity-instance-query-count/
 	url := fmt.Sprintf("%s/engine-rest/history/activity-instance/count?activityId=%s", serverUrl, activityId)
 	metric := MetricCount{}
 	err := fetchJson(url, &metric)
@@ -285,6 +441,14 @@ func collectActivities() error {
 	if err != nil {
 		return err
 	}
+	_, err = collectActivityInstanceCount("EndEvent_06tz95z", "Authenticated Service Requests", "ProcessOnlineServiceRequest")
+	if err != nil {
+		return err
+	}
+	_, err = collectActivityInstanceCount("EndEvent_1gbu6ds", "Authenticated Service Requests", "ProcessOnlineServiceRequest")
+	if err != nil {
+		return err
+	}
 	_, err = collectActivityInstanceCount("EndEvent_154enzk", "Anonymous Service Requests", "ProcessOnlineServiceRequest")
 	if err != nil {
 		return err
@@ -309,51 +473,76 @@ func collectActivities() error {
 }
 
 func fetchForShortTimer() error {
-	err := fetchMultipleIncidents("open", "deleted", "resolved")
-	if err != nil {
-		return err
-	}
-	err = collectProcessDefinitionStatistics()
-	if err != nil {
-		return err
-	}
-	err = collectActivities()
-	if err != nil {
-		return err
-	}
-	return nil
+	return measureTime("fetchForShortTimer", func () error {
+		err := fetchMultipleHistoryIncidents("open", "deleted", "resolved")
+		if err != nil {
+			return err
+		}
+		err = collectProcessDefinitionStatistics()
+		if err != nil {
+			return err
+		}
+		err = collectActivities()
+		if err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func fetchForLongTimer() error {
-	_, errMetrics := collectMetrics()
-	if errMetrics != nil {
-		return errMetrics
+	return measureTime("fetchForLongTimer", func () error {
+		_, errMetrics := collectMetrics()
+		if errMetrics != nil {
+			return errMetrics
+		}
+		return nil
+	})
+}
+
+func measureTime(name string, action func () error) error {
+	if(verbose) {
+		log.Printf("------> Measuring %s", name)
 	}
-	return nil
+	start := time.Now()
+	err := action()
+	elapsed := time.Since(start)
+	scrapeDurationCounter.With(prometheus.Labels{"name": name}).Set(elapsed.Seconds())
+	if(verbose) {
+		log.Printf("======> Elapsed time for %s scrape: %s", name, elapsed)
+	}
+	return err
 }
 
 func init() {
 	// Metrics have to be registered to be exposed:
-	prometheus.MustRegister(incidentsCounter)
+	prometheus.MustRegister(historyIncidentsCounter)
+	prometheus.MustRegister(historyProcessActivityCanceledCounter)
+	prometheus.MustRegister(historyProcessActivityCompleteScopeCounter)
+	prometheus.MustRegister(historyProcessActivityFinishedCounter)
+	prometheus.MustRegister(historyProcessActivityInstancesCounter)
 	prometheus.MustRegister(metricsCounter)
 	prometheus.MustRegister(errorCounter)
+	prometheus.MustRegister(scrapeDurationCounter)
 	prometheus.MustRegister(processInstancesCounter)
 	prometheus.MustRegister(processFailedJobsCounter)
+	prometheus.MustRegister(processActivityInstancesCounter)
+	prometheus.MustRegister(processActivityFailedJobsCounter)
 	prometheus.MustRegister(processActivitiesCounter)
 }
 
 func main() {
-	flag.StringVar(&serverUrl, "server", "", "The Camunda server")
+	flag.StringVar(&serverUrl, "server", "", "The Camunda server URI")
 	port := flag.Int("port", 8080, "The http port the server will listen on")
 	shortInterval := flag.Duration("shortInterval", time.Second*30, "The interval between 2 incidents scrapes")
 	longInterval := flag.Duration("longInterval", time.Minute*15, "The interval between 2 metrics scrapes")
 	flag.BoolVar(&verbose, "verbose", false, "Should we log the metrics?")
-
+	
 	flag.Parse()
 
 	// Validate flags
 	if serverUrl == "" {
-		fmt.Println("You must specify the Camunda server!")
+		fmt.Println("You must specify the Camunda server URI!")
 		fmt.Println()
 		flag.Usage()
 		os.Exit(1)
