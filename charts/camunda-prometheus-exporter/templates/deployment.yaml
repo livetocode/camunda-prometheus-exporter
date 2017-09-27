@@ -25,6 +25,9 @@ spec:
             - "-server={{.Values.camunda.server}}"
             - "-port={{.Values.service.internalPort}}"
             - "-verbose={{.Values.camunda.verbose}}"
+            - "-fetch-runtime={{.Values.camunda.fetchRuntime}}"
+            - "-fetch-history={{.Values.camunda.fetchHistory}}"
+            - "-fetch-metrics={{.Values.camunda.fetchMetrics}}"
           ports:
             - containerPort: {{ .Values.service.internalPort }}
           livenessProbe:

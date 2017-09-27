@@ -40,6 +40,7 @@ type ProcessDefinition struct {
 	DeploymentId string `json:"deploymentId"`
 	TenantId     string `json:"tenantId"`
 	VersionTag   string `json:"versionTag"`
+	Suspended    bool   `json:"suspended"`
 }
 
 func (def ProcessDefinition) String() string {
@@ -74,7 +75,10 @@ type ProcessDefinitionStatisticsActivityResult struct {
 var (
 	serverUrl string
 	verbose   bool
-
+	shouldFetchRuntime bool
+	shouldFetchHistory bool
+	shouldFetchMetrics bool
+	
 	httpClient = http.Client{
 		Timeout: time.Second * 5,
 	}
@@ -219,21 +223,23 @@ func fetchHistoryIncidents(status string) (int, error) {
 	err := fetchJson(url, &metric)
 	if err != nil {
 		log.Printf("Could not fetch count of %s incidents: %s\n", status, err)
-		errorCounter.With(prometheus.Labels{"name": "incidents"}).Inc()
 		return 0, err
 	}
 	if verbose {
 		log.Printf("%d %s incidents\n", metric.Count, status)
 	}
-	historyIncidentsCounter.With(prometheus.Labels{"status": status}).Set(float64(metric.Count))
 	return metric.Count, nil
 }
 
-func fetchMultipleHistoryIncidents(statuses ...string) error {
+func collectHistoryIncidents(statuses ...string) error {
 	var hasErrors = false
 	for _, status := range statuses {
-		if _, err := fetchHistoryIncidents(status); err != nil {
+		incidentCount, err := fetchHistoryIncidents(status)
+		if err != nil {
 			hasErrors = true
+			errorCounter.With(prometheus.Labels{"name": "incidents"}).Inc()
+		} else {
+			historyIncidentsCounter.With(prometheus.Labels{"status": status}).Set(float64(incidentCount))
 		}
 	}
 	if hasErrors {
@@ -341,44 +347,43 @@ func collectProcessDefinitionActivities(processDefinition ProcessDefinition) err
 		}
 	}
 	// Same as previously but in the History
-	historyStats, historyErr := fetchHistoryProcessDefinitionActivities(processDefinition.Id)
-	if historyErr != nil {
-		errorCounter.With(prometheus.Labels{"name": "fetchHistoryProcessDefinitionActivities"}).Inc()
-		return err
-	}
-	if verbose {
-		log.Printf("History: Found %d activities for process definition %s\n", len(historyStats), processDefinition.Id)
-	}
-	for _, historyStat := range historyStats {
-		labels := prometheus.Labels{
-			"activityId":        historyStat.ActivityId,
-			"definitionId":      processDefinition.Id,
-			"definitionKey":     processDefinition.Key,
-			"definitionVersion": strconv.Itoa(processDefinition.Version)}
-	
-		historyProcessActivityInstancesCounter.With(labels).Set(float64(historyStat.Instances))
-		historyProcessActivityCanceledCounter.With(labels).Set(float64(historyStat.Canceled))
-		historyProcessActivityFinishedCounter.With(labels).Set(float64(historyStat.Finished))
-		historyProcessActivityCompleteScopeCounter.With(labels).Set(float64(historyStat.CompleteScope))
-		if verbose {
-			//log.Printf("%s: %d instances / %d failedJobs\n", stat.Definition, stat.Instances, stat.FailedJobs)
+
+	if shouldFetchHistory {
+		historyStats, historyErr := fetchHistoryProcessDefinitionActivities(processDefinition.Id)
+		if historyErr != nil {
+			errorCounter.With(prometheus.Labels{"name": "fetchHistoryProcessDefinitionActivities"}).Inc()
+			return err
 		}
-	}	
+		if verbose {
+			log.Printf("History: Found %d activities for process definition %s\n", len(historyStats), processDefinition.Id)
+		}
+		for _, historyStat := range historyStats {
+			labels := prometheus.Labels{
+				"activityId":        historyStat.ActivityId,
+				"definitionId":      processDefinition.Id,
+				"definitionKey":     processDefinition.Key,
+				"definitionVersion": strconv.Itoa(processDefinition.Version)}
+		
+			historyProcessActivityInstancesCounter.With(labels).Set(float64(historyStat.Instances))
+			historyProcessActivityCanceledCounter.With(labels).Set(float64(historyStat.Canceled))
+			historyProcessActivityFinishedCounter.With(labels).Set(float64(historyStat.Finished))
+			historyProcessActivityCompleteScopeCounter.With(labels).Set(float64(historyStat.CompleteScope))
+			if verbose {
+				//log.Printf("%s: %d instances / %d failedJobs\n", stat.Definition, stat.Instances, stat.FailedJobs)
+			}
+		}	
+	}
+
 	return nil
 }
 
-func createCounterLabelsFromStats(stat ProcessDefinitionStatisticsResult) prometheus.Labels {
-	return prometheus.Labels{
-		"id":                stat.Id,
-		"definitionId":      stat.Definition.Id,
-		"definitionKey":     stat.Definition.Key,
-		"definitionVersion": strconv.Itoa(stat.Definition.Version),
-		"deploymentId":      stat.Definition.DeploymentId,
-		"tenantId":          stat.Definition.TenantId}
-}
-
 func collectProcessDefinitionStatistics() error {
-	stats, err := fetchProcessDefinitionStatistics()
+	var stats []ProcessDefinitionStatisticsResult
+	err := measureTime("fetchProcessDefinitionStatistics", func () error {
+		var err error
+		stats, err = fetchProcessDefinitionStatistics()
+		return err
+	})
 	if err != nil {
 		errorCounter.With(prometheus.Labels{"name": "fetchProcessDefinitionStatistics"}).Inc()
 		return err
@@ -387,20 +392,34 @@ func collectProcessDefinitionStatistics() error {
 		log.Printf("Found %d process definition stats\n", len(stats))
 	}
 	for _, stat := range stats {
-		labels := createCounterLabelsFromStats(stat)
+		if stat.Definition.Suspended {
+			if verbose {
+				log.Printf("Skip process definition %s because it is suspended\n", stat.Definition.Id)
+			}
+			continue
+		}
+		labels := prometheus.Labels{
+			"id":                stat.Id,
+			"definitionId":      stat.Definition.Id,
+			"definitionKey":     stat.Definition.Key,
+			"definitionVersion": strconv.Itoa(stat.Definition.Version),
+			"deploymentId":      stat.Definition.DeploymentId,
+			"tenantId":          stat.Definition.TenantId}
 		processInstancesCounter.With(labels).Set(float64(stat.Instances))
 		processFailedJobsCounter.With(labels).Set(float64(stat.FailedJobs))
 		if verbose {
 			//log.Printf("%s: %d instances / %d failedJobs\n", stat.Definition, stat.Instances, stat.FailedJobs)
 		}
-		err = collectProcessDefinitionActivities(stat.Definition)
+		err = measureTime("collectProcessDefinitionActivities", func () error {
+			return collectProcessDefinitionActivities(stat.Definition)
+		})
 		if err != nil {
 			return err
 		}
 	}
 	return nil
 }
-
+/*
 func fetchActivityInstanceCount(activityId string, activityName string, definitionKey string) (int, error) {
 	// https://docs.camunda.org/manual/7.6/reference/rest/history/activity-instance/get-activity-instance-query-count/
 	url := fmt.Sprintf("%s/engine-rest/history/activity-instance/count?activityId=%s", serverUrl, activityId)
@@ -470,34 +489,45 @@ func collectActivities() error {
 		return err
 	}
 	return nil
-}
+}*/
 
 func fetchForShortTimer() error {
 	return measureTime("fetchForShortTimer", func () error {
-		err := fetchMultipleHistoryIncidents("open", "deleted", "resolved")
+		if shouldFetchHistory {
+			err := measureTime("collectHistoryIncidents", func () error {
+				return collectHistoryIncidents("open", "deleted", "resolved")
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if shouldFetchRuntime {
+			err := measureTime("collectProcessDefinitionStatistics", func () error {
+				return collectProcessDefinitionStatistics()
+			})
+			if err != nil {
+				return err
+			}
+		}
+		/*err = collectActivities()
 		if err != nil {
 			return err
-		}
-		err = collectProcessDefinitionStatistics()
-		if err != nil {
-			return err
-		}
-		err = collectActivities()
-		if err != nil {
-			return err
-		}
+		}*/
 		return nil
 	})
 }
 
 func fetchForLongTimer() error {
-	return measureTime("fetchForLongTimer", func () error {
-		_, errMetrics := collectMetrics()
-		if errMetrics != nil {
-			return errMetrics
-		}
-		return nil
-	})
+	if shouldFetchMetrics {
+		return measureTime("fetchForLongTimer", func () error {
+			_, errMetrics := collectMetrics()
+			if errMetrics != nil {
+				return errMetrics
+			}
+			return nil
+		})
+	}
+	return nil
 }
 
 func measureTime(name string, action func () error) error {
@@ -537,6 +567,9 @@ func main() {
 	shortInterval := flag.Duration("shortInterval", time.Second*30, "The interval between 2 incidents scrapes")
 	longInterval := flag.Duration("longInterval", time.Minute*15, "The interval between 2 metrics scrapes")
 	flag.BoolVar(&verbose, "verbose", false, "Should we log the metrics?")
+	flag.BoolVar(&shouldFetchRuntime, "fetch-runtime", false, "Should we fetch runtime data?")
+	flag.BoolVar(&shouldFetchHistory, "fetch-history", false, "Should we fetch history data?")
+	flag.BoolVar(&shouldFetchMetrics, "fetch-metrics", false, "Should we fetch metrics?")
 	
 	flag.Parse()
 
@@ -558,17 +591,21 @@ func main() {
 	shortTicker := time.NewTicker(*shortInterval)
 	go func() {
 		for range shortTicker.C {
+			log.Println("Short timer event")
 			fetchForShortTimer()
 		}
 	}()
-	longTicker := time.NewTicker(*longInterval)
-	go func() {
-		for range longTicker.C {
-			fetchForLongTimer()
-		}
-	}()
-	defer longTicker.Stop()
-
+	if shouldFetchMetrics {
+		longTicker := time.NewTicker(*longInterval)
+		go func() {
+			for range longTicker.C {
+				log.Println("Long timer event")
+				fetchForLongTimer()
+			}
+		}()
+		defer longTicker.Stop()
+	}
+	
 	// The Handler function provides a default handler to expose metrics
 	// via an HTTP server. "/metrics" is the usual endpoint for that.
 	http.Handle("/metrics", promhttp.Handler())

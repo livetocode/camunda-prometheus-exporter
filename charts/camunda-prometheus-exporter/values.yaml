@@ -6,6 +6,9 @@ camunda:
   shortInterval: 30s
   longInterval: 15m
   verbose: false
+  fetchRuntime: true
+  fetchHistory: true
+  fetchMetrics: true
 replicaCount: 1
 image:
   repository: livetocode/camunda-prometheus-exporter
