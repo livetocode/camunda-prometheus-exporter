@@ -1,22 +1,23 @@
 package main
 
 import (
+	"strings"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/url"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
+	"path"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
-
-//TODO: measure elapsed time for a scrape
 
 type MetricCount struct {
 	Count int `json:"count"`
@@ -74,6 +75,7 @@ type ProcessDefinitionStatisticsActivityResult struct {
 
 var (
 	serverUrl string
+	restPrefix string
 	verbose   bool
 	shouldFetchRuntime bool
 	shouldFetchHistory bool
@@ -187,8 +189,21 @@ var (
 	)
 )
 
-func fetchJson(url string, data interface{}) error {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func fetchJson(anUrl string, data interface{}) error {
+	if !strings.HasPrefix(anUrl, "http") {
+		u, err := url.Parse(serverUrl)
+		if err != nil {
+			return err
+		}
+		u2, err2 := url.Parse(anUrl)
+		if err2 != nil {
+			return err2
+		}
+		u.Path = path.Join(restPrefix, u2.Path)	
+		u.RawQuery = u2.RawQuery
+		anUrl = u.String()
+	}
+	req, err := http.NewRequest(http.MethodGet, anUrl, nil)
 	if err != nil {
 		return err
 	}
@@ -199,10 +214,10 @@ func fetchJson(url string, data interface{}) error {
 	}
 	//TODO: should we allow 404?
 	if verbose {
-		log.Printf("%s -> %d\n", url, res.StatusCode)
+		log.Printf("%s -> %d\n", anUrl, res.StatusCode)
 	}
 	if res.StatusCode != 200 {
-		return errors.New(fmt.Sprintf("%s => %d", url, res.StatusCode))
+		return errors.New(fmt.Sprintf("%s => %d", anUrl, res.StatusCode))
 	}
 	body, readErr := ioutil.ReadAll(res.Body)
 	if readErr != nil {
@@ -218,7 +233,7 @@ func fetchJson(url string, data interface{}) error {
 
 func fetchHistoryIncidents(status string) (int, error) {
 	// https://docs.camunda.org/manual/7.6/reference/rest/history/incident/get-incident-query-count/
-	url := fmt.Sprintf("%s/engine-rest/history/incident/count?%s=true", serverUrl, status)
+	url := fmt.Sprintf("/history/incident/count?%s=true", status)
 	metric := MetricCount{}
 	err := fetchJson(url, &metric)
 	if err != nil {
@@ -250,7 +265,7 @@ func collectHistoryIncidents(statuses ...string) error {
 
 func fetchMetrics(maxResults int, startDate string) ([]Metric, error) {
 	// https://docs.camunda.org/manual/7.6/reference/rest/metrics/get-metrics-interval/
-	url := fmt.Sprintf("%s/engine-rest/metrics?maxResults=%d", serverUrl, maxResults)
+	url := fmt.Sprintf("/metrics?maxResults=%d", maxResults)
 	if startDate != "" {
 		url += fmt.Sprintf("&startDate=%s", startDate)
 	}
@@ -293,7 +308,7 @@ func collectMetrics() ([]Metric, error) {
 
 func fetchProcessDefinitionStatistics() ([]ProcessDefinitionStatisticsResult, error) {
 	// https://docs.camunda.org/manual/7.7/reference/rest/process-definition/get-statistics/
-	url := fmt.Sprintf("%s/engine-rest/process-definition/statistics?failedJobs=true", serverUrl)
+	url := "/process-definition/statistics?failedJobs=true"
 	result := []ProcessDefinitionStatisticsResult{}
 	err := fetchJson(url, &result)
 	if err != nil {
@@ -304,7 +319,7 @@ func fetchProcessDefinitionStatistics() ([]ProcessDefinitionStatisticsResult, er
 
 func fetchProcessDefinitionActivities(processDefinitionId string) ([]ProcessDefinitionStatisticsActivityResult, error) {
 	// https://docs.camunda.org/manual/7.6/reference/rest/process-definition/get-activity-statistics/
-	url := fmt.Sprintf("%s/engine-rest/process-definition/%s/statistics?failedJobs=true", serverUrl, processDefinitionId)
+	url := fmt.Sprintf("/process-definition/%s/statistics?failedJobs=true", processDefinitionId)
 	result := []ProcessDefinitionStatisticsActivityResult{}
 	err := fetchJson(url, &result)
 	if err != nil {
@@ -315,7 +330,7 @@ func fetchProcessDefinitionActivities(processDefinitionId string) ([]ProcessDefi
 
 func fetchHistoryProcessDefinitionActivities(processDefinitionId string) ([]HistoryProcessDefinitionActivityResult, error) {
 	// https://docs.camunda.org/manual/7.6/reference/rest/history/process-definition/get-historic-activity-statistics/
-	url := fmt.Sprintf("%s/engine-rest/history/process-definition/%s/statistics?canceled=true&finished=true&completeScope=true", serverUrl, processDefinitionId)
+	url := fmt.Sprintf("/history/process-definition/%s/statistics?canceled=true&finished=true&completeScope=true", processDefinitionId)
 	result := []HistoryProcessDefinitionActivityResult{}
 	err := fetchJson(url, &result)
 	if err != nil {
@@ -346,8 +361,8 @@ func collectProcessDefinitionActivities(processDefinition ProcessDefinition) err
 			//log.Printf("%s: %d instances / %d failedJobs\n", stat.Definition, stat.Instances, stat.FailedJobs)
 		}
 	}
-	// Same as previously but in the History
 
+	// Same as previously but in the History
 	if shouldFetchHistory {
 		historyStats, historyErr := fetchHistoryProcessDefinitionActivities(processDefinition.Id)
 		if historyErr != nil {
@@ -419,77 +434,6 @@ func collectProcessDefinitionStatistics() error {
 	}
 	return nil
 }
-/*
-func fetchActivityInstanceCount(activityId string, activityName string, definitionKey string) (int, error) {
-	// https://docs.camunda.org/manual/7.6/reference/rest/history/activity-instance/get-activity-instance-query-count/
-	url := fmt.Sprintf("%s/engine-rest/history/activity-instance/count?activityId=%s", serverUrl, activityId)
-	metric := MetricCount{}
-	err := fetchJson(url, &metric)
-	if err != nil {
-		return 0, err
-	}
-	return metric.Count, nil
-}
-
-func collectActivityInstanceCount(activityId string, activityName string, definitionKey string) (int, error) {
-	count, err := fetchActivityInstanceCount(activityId, activityName, definitionKey)
-	if err != nil {
-		log.Printf("Could not fetch count of %s activities: %s\n", activityId, err)
-		errorCounter.With(prometheus.Labels{"name": "activities"}).Inc()
-		return 0, err
-	}
-	if verbose {
-		log.Printf("%s (%s) = %d\n", activityName, activityId, count)
-	}
-	processActivitiesCounter.With(prometheus.Labels{"activityId": activityId, 
-		"activityName": activityName, 
-		"definitionKey": definitionKey}).Set(float64(count))
-	return count, nil
-}
-
-func collectActivities() error {
-	_, err := collectActivityInstanceCount("StartEvent_0l8qdec", "Service Requests Created", "ProcessOnlineServiceRequest")
-	if err != nil {
-		return err
-	}
-	_, err = collectActivityInstanceCount("EndEvent_0tgip1s", "Service Requests Closed", "ProcessOnlineServiceRequest")
-	if err != nil {
-		return err
-	}
-	_, err = collectActivityInstanceCount("ServiceTask_1010dsd", "Authenticated Service Requests", "ProcessOnlineServiceRequest")
-	if err != nil {
-		return err
-	}
-	_, err = collectActivityInstanceCount("EndEvent_06tz95z", "Authenticated Service Requests", "ProcessOnlineServiceRequest")
-	if err != nil {
-		return err
-	}
-	_, err = collectActivityInstanceCount("EndEvent_1gbu6ds", "Authenticated Service Requests", "ProcessOnlineServiceRequest")
-	if err != nil {
-		return err
-	}
-	_, err = collectActivityInstanceCount("EndEvent_154enzk", "Anonymous Service Requests", "ProcessOnlineServiceRequest")
-	if err != nil {
-		return err
-	}
-	_, err = collectActivityInstanceCount("EndEvent_1n9otub", "Anonymous Service Requests", "ProcessOnlineServiceRequest")
-	if err != nil {
-		return err
-	}
-	_, err = collectActivityInstanceCount("ServiceTask_0yuo3ru", "Subscriptions created", "ProcessOnlineServiceRequest")
-	if err != nil {
-		return err
-	}
-	_, err = collectActivityInstanceCount("SendTask_1fjvapz", "Send Email", "ProcessOnlineServiceRequest_emailSend")
-	if err != nil {
-		return err
-	}
-	_, err = collectActivityInstanceCount("EndEvent_1uexl7r", "Individuals Requested Not to be notified", "ProcessOnlineServiceRequest_emailSend")
-	if err != nil {
-		return err
-	}
-	return nil
-}*/
 
 func fetchForShortTimer() error {
 	return measureTime("fetchForShortTimer", func () error {
@@ -509,10 +453,6 @@ func fetchForShortTimer() error {
 				return err
 			}
 		}
-		/*err = collectActivities()
-		if err != nil {
-			return err
-		}*/
 		return nil
 	})
 }
@@ -563,6 +503,7 @@ func init() {
 
 func main() {
 	flag.StringVar(&serverUrl, "server", "", "The Camunda server URI")
+	flag.StringVar(&restPrefix, "restPrefix", "rest", "The REST prefix used to access the Camunda API")
 	port := flag.Int("port", 8080, "The http port the server will listen on")
 	shortInterval := flag.Duration("shortInterval", time.Second*30, "The interval between 2 incidents scrapes")
 	longInterval := flag.Duration("longInterval", time.Minute*15, "The interval between 2 metrics scrapes")
