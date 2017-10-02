@@ -23,6 +23,7 @@ spec:
             - "-shortInterval={{.Values.camunda.shortInterval}}"
             - "-longInterval={{.Values.camunda.longInterval}}"
             - "-server={{.Values.camunda.server}}"
+            - "-restPrefix={{.Values.camunda.restPrefix}}"
             - "-port={{.Values.service.internalPort}}"
             - "-verbose={{.Values.camunda.verbose}}"
             - "-fetch-runtime={{.Values.camunda.fetchRuntime}}"
