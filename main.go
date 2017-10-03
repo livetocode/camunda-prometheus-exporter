@@ -165,14 +165,13 @@ var (
 		[]string{"activityId", "definitionKey", "definitionId", "definitionVersion"},
 	)
 
-	processActivitiesCounter = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "camunda_process_activities_total",
-			Help: "Number of instances of a specific activity",
+	requestCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "camunda_scrape_requests_total",
+			Help: "Number of http requests made to the Camunda APIs.",
 		},
-		[]string{"activityId", "activityName", "definitionKey"},
+		[]string{"httpStatusCode"},
 	)
-
 	errorCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "camunda_scrape_errors_total",
@@ -216,6 +215,7 @@ func fetchJson(anUrl string, data interface{}) error {
 	if verbose {
 		log.Printf("%s -> %d\n", anUrl, res.StatusCode)
 	}
+	requestCounter.With(prometheus.Labels{"httpStatusCode": strconv.Itoa(res.StatusCode)}).Inc()
 	if res.StatusCode != 200 {
 		return errors.New(fmt.Sprintf("%s => %d", anUrl, res.StatusCode))
 	}
@@ -413,6 +413,13 @@ func collectProcessDefinitionStatistics() error {
 			}
 			continue
 		}
+		/* Note sure if we can simply skip stats without instances or failed jobs.
+		if stat.Instances + stat.FailedJobs == 0 {
+			if verbose {
+				log.Printf("Skip process definition %s because there are no instances nor failed jobs\n", stat.Definition.Id)
+			}
+			continue
+		}*/
 		labels := prometheus.Labels{
 			"id":                stat.Id,
 			"definitionId":      stat.Definition.Id,
@@ -494,11 +501,11 @@ func init() {
 	prometheus.MustRegister(metricsCounter)
 	prometheus.MustRegister(errorCounter)
 	prometheus.MustRegister(scrapeDurationCounter)
+	prometheus.MustRegister(requestCounter)
 	prometheus.MustRegister(processInstancesCounter)
 	prometheus.MustRegister(processFailedJobsCounter)
 	prometheus.MustRegister(processActivityInstancesCounter)
 	prometheus.MustRegister(processActivityFailedJobsCounter)
-	prometheus.MustRegister(processActivitiesCounter)
 }
 
 func main() {

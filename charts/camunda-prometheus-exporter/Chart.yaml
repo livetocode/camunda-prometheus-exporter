@@ -1,4 +1,4 @@
 apiVersion: v1
 description: A Prometheus Exporter that will create a metric for the number of messages produced by a room.
 name: camunda-prometheus-exporter
-version: 0.1.0
+version: 0.1.1
