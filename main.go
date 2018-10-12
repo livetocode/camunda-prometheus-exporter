@@ -59,28 +59,30 @@ type ProcessDefinitionStatisticsResult struct {
 }
 
 type HistoryProcessDefinitionActivityResult struct {
-	ActivityId    	string       `json:"id"`
-	Instances  		int          `json:"instances"`
-	Canceled   		int          `json:"canceled"`
-	Finished   		int          `json:"finished"`
-	CompleteScope	int          `json:"completeScope"`
+	ActivityId    string `json:"id"`
+	Instances     int    `json:"instances"`
+	Canceled      int    `json:"canceled"`
+	Finished      int    `json:"finished"`
+	CompleteScope int    `json:"completeScope"`
 }
 
 type ProcessDefinitionStatisticsActivityResult struct {
-	ActivityId string            `json:"id"`
-	Instances  int               `json:"instances"`
-	FailedJobs int               `json:"failedJobs"`
+	ActivityId string `json:"id"`
+	Instances  int    `json:"instances"`
+	FailedJobs int    `json:"failedJobs"`
 	//Incidents
 }
 
 var (
-	serverUrl string
-	restPrefix string
-	verbose   bool
+	serverUrl          string
+	restPrefix         string
+	verbose            bool
 	shouldFetchRuntime bool
 	shouldFetchHistory bool
 	shouldFetchMetrics bool
-	
+	user               string
+	password           string
+
 	httpClient = http.Client{
 		Timeout: time.Second * 5,
 	}
@@ -198,11 +200,12 @@ func fetchJson(anUrl string, data interface{}) error {
 		if err2 != nil {
 			return err2
 		}
-		u.Path = path.Join(restPrefix, u2.Path)	
+		u.Path = path.Join(restPrefix, u2.Path)
 		u.RawQuery = u2.RawQuery
 		anUrl = u.String()
 	}
 	req, err := http.NewRequest(http.MethodGet, anUrl, nil)
+	req.SetBasicAuth(user, password)
 	if err != nil {
 		return err
 	}
@@ -518,7 +521,9 @@ func main() {
 	flag.BoolVar(&shouldFetchRuntime, "fetch-runtime", false, "Should we fetch runtime data?")
 	flag.BoolVar(&shouldFetchHistory, "fetch-history", false, "Should we fetch history data?")
 	flag.BoolVar(&shouldFetchMetrics, "fetch-metrics", false, "Should we fetch metrics?")
-	
+	flag.StringVar(&user, "user", "", "The Camunda API user")
+	flag.StringVar(&password, "password", "", "The Camunda API password")
+
 	flag.Parse()
 
 	// Validate flags
