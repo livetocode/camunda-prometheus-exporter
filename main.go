@@ -268,13 +268,13 @@ func collectHistoryIncidents(statuses ...string) error {
 
 func fetchMetrics(maxResults int, startDate string) ([]Metric, error) {
 	// https://docs.camunda.org/manual/7.6/reference/rest/metrics/get-metrics-interval/
-	url := fmt.Sprintf("/metrics?maxResults=%d", maxResults)
+	url_str := fmt.Sprintf("/metrics?maxResults=%d", maxResults)
 	if startDate != "" {
-		url += fmt.Sprintf("&startDate=%s", startDate)
+		url_str += fmt.Sprintf("&startDate=%s", url.QueryEscape(startDate))
 	}
 
 	metrics := []Metric{}
-	err := fetchJson(url, &metrics)
+	err := fetchJson(url_str, &metrics)
 	if err != nil {
 		return nil, err
 	}
